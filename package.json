@@ -1,0 +1,29 @@
+{
+  "name": "pump-swap-sdk",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brooke007/pump-swap-sdk.git"
+  },
+  "keywords": [
+    "pump-swap"
+  ],
+  "author": "brooke007",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/brooke007/pump-swap-sdk/issues"
+  },
+  "homepage": "https://github.com/brooke007/pump-swap-sdk#readme",
+  "dependencies": {
+    "@bloxroute/solana-trader-client-ts": "^2.2.5",
+    "@coral-xyz/anchor": "^0.31.0",
+    "@raydium-io/raydium-sdk": "^1.3.1-beta.58",
+    "@solana/web3.js": "^1.98.0",
+    "winston": "^3.17.0"
+  }
+}
