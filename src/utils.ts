@@ -16,31 +16,43 @@ import {
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { PriorityFee, TransactionResult } from "./types";
 import { jito_executeAndConfirm } from "./transactions/jito";
-import { jito_fee } from "./config";
+import { connection, jito_fee, wallet } from "./config";
 import fs from "fs";
 import { bs58 } from "@coral-xyz/anchor/dist/cjs/utils/bytes";
 import { logger } from "./logger";
+import { AnchorProvider } from "@coral-xyz/anchor";
 export const DEFAULT_COMMITMENT = "confirmed";
 export const DEFAULT_FINALITY = "confirmed";
 
-export async function getSPLBalance  (
+export const getProvider = () => {
+  return new AnchorProvider(connection, wallet, {
+    skipPreflight: true,
+    commitment: "confirmed",
+  });
+};
+
+export async function getSPLBalance(
   connection: Connection,
   mintAddress: PublicKey,
   pubKey: PublicKey,
   allowOffCurve = false
-): Promise<number> {  
+): Promise<number> {
   try {
     let ata = getAssociatedTokenAddressSync(mintAddress, pubKey, allowOffCurve);
-    const balance = await connection.getTokenAccountBalance(ata, "confirmed");
-    return balance.value.uiAmount || 0;
+    try {
+      const balance = await connection.getTokenAccountBalance(ata, "confirmed");
+      return balance.value.uiAmount || 0;
+    } catch (e) {
+      return 0;
+    }
   } catch (e) {
     logger.error({
       status: "Failed to get SPL token balance",
-      error: e instanceof Error ? e.message : String(e)
+      error: JSON.stringify(e, Object.getOwnPropertyNames(e)),
     });
   }
   return 0;
-};
+}
 
 export const calculateWithSlippageBuy = (
   amount: bigint,
@@ -66,16 +78,11 @@ export async function sendTxToJito(
   const blockhash = await connection.getLatestBlockhash();
   let final_tx = new Transaction();
   final_tx.add(tx);
-  let versionedTx = await buildVersionedTx(
-    connection,
-    payer.publicKey,
-    final_tx,
-    connection.commitment
-  );
-  versionedTx.sign(signers);
+
+  tx.sign(signers);
   try {
     const { confirmed, signature } = await jito_executeAndConfirm(
-      versionedTx,
+      tx,
       payer,
       blockhash,
       jitofee
@@ -176,10 +183,11 @@ export const buildVersionedTx = async (
 ): Promise<VersionedTransaction> => {
   const blockHash = (await connection.getLatestBlockhash(commitment)).blockhash;
 
+  console.log("payer", payer);
   let messageV0 = new TransactionMessage({
     payerKey: payer,
-    recentBlockhash: blockHash,
     instructions: tx.instructions,
+    recentBlockhash: blockHash,
   }).compileToV0Message();
 
   return new VersionedTransaction(messageV0);
@@ -281,7 +289,7 @@ export async function generateWalletsAndDropSOL(
     let newWallet = Keypair.generate();
 
     console.log("New wallet created: ", newWallet.publicKey.toBase58());
-    const privateKey:string = bs58.encode(newWallet.secretKey);
+    const privateKey: string = bs58.encode(newWallet.secretKey);
     existingWallets.push(privateKey);
     // Transfer SOL to the new wallet
     final_tx.add(
@@ -297,12 +305,7 @@ export async function generateWalletsAndDropSOL(
   const blockhash = await connection.getLatestBlockhash("confirmed");
   final_tx.feePayer = masterWallet.publicKey;
   final_tx.recentBlockhash = blockhash.blockhash;
-  await sendTxToJito(
-    connection,
-    final_tx,
-    masterWallet,
-    [masterWallet],
-  );
+  await sendTxToJito(connection, final_tx, masterWallet, [masterWallet]);
 
   // Save the updated array to the file
   try {

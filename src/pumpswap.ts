@@ -13,12 +13,16 @@ import {
   getAssociatedTokenAddress,
   getAssociatedTokenAddressSync,
   createAssociatedTokenAccountIdempotentInstruction,
+  createSyncNativeInstruction,
+  createAssociatedTokenAccountInstruction,
+  createCloseAccountInstruction,
+  NATIVE_MINT,
 } from "@solana/spl-token";
-import { PumpSwap } from "../IDL";
-import { connection, wallet } from "./config";
+import { IDL, PumpSwap } from "../IDL";
+import { connection, walletKeypair } from "./config";
 import { getBuyTokenAmount, getPumpSwapPool } from "./pool";
-import { getSPLBalance, sendTxToJito } from "./utils";
-import { logger } from "./logger"
+import { getSPLBalance, sendTxToJito, getProvider } from "./utils";
+import { logger } from "./logger";
 
 // Define static public keys
 const PUMP_AMM_PROGRAM_ID: PublicKey = new PublicKey(
@@ -56,56 +60,147 @@ export class PumpSwapSDK {
   public program: Program<PumpSwap>;
   public connection: Connection;
   constructor() {
-    // this.program = new Program<PumpSwap>(IDL as PumpSwap, provider);
-    // this.connection = this.program.provider.connection;
+    this.program = new Program<PumpSwap>(IDL as PumpSwap, getProvider());
+    this.connection = this.program.provider.connection;
   }
   public async buy(mint: PublicKey, user: PublicKey, solToBuy: number) {
-    const slippage = 0.3; // Default: 30%
-    const bought_token_amount = await getBuyTokenAmount(
-      BigInt(solToBuy * LAMPORTS_PER_SOL),
-      mint
-    );
-    logger.info({
-      status: `finding pumpswap pool for ${mint}`,
-    });
-    const pool = await getPumpSwapPool(mint);
-    const pumpswap_buy_tx = await this.createBuyInstruction(
-      pool,
-      user,
-      mint,
-      bought_token_amount,
-      BigInt(Math.floor(solToBuy * (1 + slippage) * LAMPORTS_PER_SOL))
-    );
-    const ata = getAssociatedTokenAddressSync(mint, user);
-    const ix_list: any[] = [
-      ...[
+    try {
+      const slippage = 0.1;
+
+      // 获取或创建代币账户
+      const ata = getAssociatedTokenAddressSync(mint, user);
+      console.log("代币账户地址:", ata.toBase58());
+
+      const wsolAta = getAssociatedTokenAddressSync(WSOL_TOKEN_ACCOUNT, user);
+
+      // 检查代币账户是否存在
+      const accountInfo = await connection.getAccountInfo(ata);
+
+      // 构建指令列表
+      const ix_list: TransactionInstruction[] = [
+        // 设置计算预算
         ComputeBudgetProgram.setComputeUnitLimit({
-          units: 300000,
+          units: 130000,
         }),
         ComputeBudgetProgram.setComputeUnitPrice({
-          microLamports: 696969,
+          microLamports: 90000,
         }),
-      ],
+      ];
 
-      createAssociatedTokenAccountIdempotentInstruction(
-        wallet.publicKey,
-        ata,
-        wallet.publicKey,
+      // 如果代币账户不存在，添加创建账户指令
+      if (!accountInfo) {
+        console.log("创建代币账户");
+        ix_list.push(
+          createAssociatedTokenAccountInstruction(
+            walletKeypair.publicKey, // payer
+            ata, // ata
+            user, // owner
+            mint // mint
+          )
+        );
+      }
+
+      // 创建并注资 WSOL 账户
+      ix_list.push(
+        // 创建 WSOL 账户
+        createAssociatedTokenAccountIdempotentInstruction(
+          walletKeypair.publicKey, // payer
+          wsolAta, // ata
+          user, // owner
+          NATIVE_MINT // WSOL mint
+        ),
+        // 注资 WSOL 账户
+        SystemProgram.transfer({
+          fromPubkey: walletKeypair.publicKey,
+          toPubkey: wsolAta,
+          lamports: solToBuy * LAMPORTS_PER_SOL * 3, // TODO:
+        }),
+        // 同步 WSOL 余额
+        createSyncNativeInstruction(wsolAta)
+      );
+
+      // 代币账户处理
+      const tokenAta = getAssociatedTokenAddressSync(mint, user);
+      ix_list.push(
+        createAssociatedTokenAccountIdempotentInstruction(
+          walletKeypair.publicKey,
+          tokenAta,
+          user,
+          mint
+        )
+      );
+
+      // 获取交易池和买入数量
+      const bought_token_amount = await getBuyTokenAmount(
+        BigInt(solToBuy * LAMPORTS_PER_SOL),
         mint
-      ),
-      pumpswap_buy_tx,
-    ];
+      );
 
-    const latestBlockhash = await connection.getLatestBlockhash();
+      const pool = await getPumpSwapPool(mint);
 
-    const messageV0 = new TransactionMessage({
-      payerKey: wallet.publicKey,
-      recentBlockhash: latestBlockhash.blockhash,
-      instructions: ix_list,
-    }).compileToV0Message();
-    const transaction = new VersionedTransaction(messageV0);
-    transaction.sign([wallet]);
-    sendTxToJito(connection, transaction, wallet, [wallet]);
+      // 添加买入指令
+      const pumpswap_buy_tx = await this.createBuyInstruction(
+        pool,
+        user,
+        mint,
+        bought_token_amount,
+        BigInt(Math.floor(solToBuy * (1 + slippage) * LAMPORTS_PER_SOL))
+      );
+      ix_list.push(pumpswap_buy_tx);
+
+      // 添加关闭 WSOL 账户的指令（回收 SOL）
+      ix_list.push(
+        createCloseAccountInstruction(
+          wsolAta, // 要关闭的账户
+          user, // SOL 接收者
+          user, // 账户所有者
+          [] // 额外的签名者
+        )
+      );
+
+      const latestBlockhash = await connection.getLatestBlockhash();
+
+      // 创建并签名交易
+      const messageV0 = new TransactionMessage({
+        payerKey: walletKeypair.publicKey,
+        recentBlockhash: latestBlockhash.blockhash,
+        instructions: ix_list,
+      }).compileToV0Message();
+
+      const transaction = new VersionedTransaction(messageV0);
+      transaction.sign([walletKeypair]);
+
+      // 模拟交易
+      // const simulation = await connection.simulateTransaction(transaction);
+      // console.log("交易模拟结果:", {
+      //   logs: simulation.value.logs,
+      //   unitsConsumed: simulation.value.unitsConsumed,
+      //   returnData: simulation.value.returnData,
+      // });
+      // if (simulation.value.err) {
+      //   console.error("交易模拟失败:", simulation.value.err);
+      //   throw new Error(
+      //     `Transaction simulation failed: ${JSON.stringify(
+      //       simulation.value.err
+      //     )}`
+      //   );
+      // }
+
+      // 发送交易
+      await sendTxToJito(connection, transaction, walletKeypair, [
+        walletKeypair,
+      ]);
+
+      // 等待确认并检查余额
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const newBalance = await getSPLBalance(connection, mint, user);
+      console.log("新余额:", newBalance);
+
+      return true;
+    } catch (error) {
+      console.error("买入过程中出错:", error);
+      throw error;
+    }
   }
 
   public async sell_exactAmount(
@@ -118,43 +213,53 @@ export class PumpSwapSDK {
       status: `finding pumpswap pool for ${mint}`,
     });
     const pool = await getPumpSwapPool(mint);
-    const pumpswap_buy_tx = await this.createSellInstruction(
+
+    const wsolAta = getAssociatedTokenAddressSync(WSOL_TOKEN_ACCOUNT, user);
+
+    // 构建指令列表
+    const ix_list: TransactionInstruction[] = [
+      // 设置计算预算
+      ComputeBudgetProgram.setComputeUnitLimit({
+        units: 130000,
+      }),
+      ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: 90000,
+      }),
+    ];
+
+     ix_list.push(
+       // 创建 WSOL 账户
+       createAssociatedTokenAccountIdempotentInstruction(
+         walletKeypair.publicKey, // payer
+         wsolAta, // ata
+         user, // owner
+         NATIVE_MINT // WSOL mint
+       ),
+
+       // 同步 WSOL 余额
+       createSyncNativeInstruction(wsolAta)
+     );
+
+    const pumpswap_sell_tx = await this.createSellInstruction(
       await getPumpSwapPool(mint),
       user,
       mint,
-      BigInt(Math.floor(sell_token_amount * 10 ** 6)),
+      BigInt(Math.floor(sell_token_amount * 10 ** 6)), // TODO:
       BigInt(0)
     );
-    const ata = getAssociatedTokenAddressSync(mint, user);
-    const ix_list: any[] = [
-      ...[
-        ComputeBudgetProgram.setComputeUnitLimit({
-          units: 100000,
-        }),
-        ComputeBudgetProgram.setComputeUnitPrice({
-          microLamports: 696969,
-        }),
-      ],
 
-      createAssociatedTokenAccountIdempotentInstruction(
-        wallet.publicKey,
-        ata,
-        wallet.publicKey,
-        mint
-      ),
-      pumpswap_buy_tx,
-    ];
+    ix_list.push(pumpswap_sell_tx);
 
     const latestBlockhash = await connection.getLatestBlockhash();
     const messageV0 = new TransactionMessage({
-      payerKey: wallet.publicKey,
+      payerKey: walletKeypair.publicKey,
       recentBlockhash: latestBlockhash.blockhash,
       instructions: ix_list,
     }).compileToV0Message();
     const transaction = new VersionedTransaction(messageV0);
-    transaction.sign([wallet]);
-    //sendNozomiTx(ix_list, wallet_1, latestBlockhash, "PumpSwap", "sell");
-    sendTxToJito(connection, transaction, wallet, [wallet]);
+    transaction.sign([walletKeypair]);
+    //sendNozomiTx(ix_list, walletKeypair_1, latestBlockhash, "PumpSwap", "sell");
+    sendTxToJito(connection, transaction, walletKeypair, [walletKeypair]);
   }
   public async sell_percentage(
     mint: PublicKey,
@@ -178,17 +283,17 @@ export class PumpSwapSDK {
     const ix_list: any[] = [
       ...[
         ComputeBudgetProgram.setComputeUnitLimit({
-          units: 100000,
+          units: 130000,
         }),
         ComputeBudgetProgram.setComputeUnitPrice({
-          microLamports: 696969,
+          microLamports: 90000,
         }),
       ],
 
       createAssociatedTokenAccountIdempotentInstruction(
-        wallet.publicKey,
+        walletKeypair.publicKey,
         ata,
-        wallet.publicKey,
+        walletKeypair.publicKey,
         mint
       ),
       pumpswap_buy_tx,
@@ -196,14 +301,14 @@ export class PumpSwapSDK {
 
     const latestBlockhash = await connection.getLatestBlockhash();
     const messageV0 = new TransactionMessage({
-      payerKey: wallet.publicKey,
+      payerKey: walletKeypair.publicKey,
       recentBlockhash: latestBlockhash.blockhash,
       instructions: ix_list,
     }).compileToV0Message();
     const transaction = new VersionedTransaction(messageV0);
-    transaction.sign([wallet]);
-    //sendNozomiTx(ix_list, wallet_1, latestBlockhash, "PumpSwap", "sell");
-    sendTxToJito(connection, transaction, wallet, [wallet]);
+    transaction.sign([walletKeypair]);
+    //sendNozomiTx(ix_list, walletKeypair_1, latestBlockhash, "PumpSwap", "sell");
+    sendTxToJito(connection, transaction, walletKeypair, [walletKeypair]);
   }
   async createBuyInstruction(
     poolId: PublicKey,
@@ -214,10 +319,12 @@ export class PumpSwapSDK {
   ): Promise<TransactionInstruction> {
     // Compute associated token account addresses
     const userBaseTokenAccount = await getAssociatedTokenAddress(mint, user);
+
     const userQuoteTokenAccount = await getAssociatedTokenAddress(
       WSOL_TOKEN_ACCOUNT,
       user
     );
+
     const poolBaseTokenAccount = await getAssociatedTokenAddress(
       mint,
       poolId,

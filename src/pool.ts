@@ -26,6 +26,8 @@ interface PoolWithPrice extends Pool {
     token: number;
   };
 }
+
+// 这里可以优化 不用过滤 直接算 pool account is a pda account
 const getPoolsWithBaseMint = async (mintAddress: PublicKey) => {
   let response,
     is_err = true,
@@ -52,7 +54,9 @@ const getPoolsWithBaseMint = async (mintAddress: PublicKey) => {
     cnt++;
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-
+  if (!response) {
+    throw new Error("No pools found");
+  }
   const mappedPools = response.map((pool) => {
     const data = Buffer.from(pool.account.data);
     const poolData = program.coder.accounts.decode("pool", data);
@@ -142,14 +146,14 @@ const getPriceAndLiquidity = async (pool: Pool) => {
     cnt++;
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  const price = wsolBalance.value.uiAmount! / tokenBalance.value.uiAmount!;
+  const price = wsolBalance?.value.uiAmount! / tokenBalance?.value.uiAmount!;
 
   return {
     ...pool,
     price,
     reserves: {
-      native: wsolBalance.value.uiAmount!,
-      token: tokenBalance.value.uiAmount!,
+      native: wsolBalance?.value.uiAmount!,
+      token: tokenBalance?.value.uiAmount!,
     },
   } as PoolWithPrice;
 };
@@ -175,6 +179,7 @@ export const calculateWithSlippageBuy = (
 ) => {
   return amount - (amount * basisPoints) / 10000n;
 };
+
 export const getBuyTokenAmount = async (solAmount: bigint, mint: PublicKey) => {
   const pool_detail = await getPoolsWithPrices(mint);
   const sol_reserve = BigInt(
@@ -191,6 +196,7 @@ export const getBuyTokenAmount = async (solAmount: bigint, mint: PublicKey) => {
   return amount_to_be_purchased;
 };
 
+// TODO
 export const getPumpSwapPool = async (mint: PublicKey) => {
   const pools = await getPoolsWithBaseMint(mint);
   return pools[0].address;

@@ -7,7 +7,6 @@ import {
 } from "@solana/web3.js";
 import axios from "axios";
 import bs58 from "bs58";
-import { Currency, CurrencyAmount } from "@raydium-io/raydium-sdk";
 import { connection } from "../config";
 const jito_Validators = [
   "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
@@ -21,10 +20,10 @@ const jito_Validators = [
 ];
 const endpoints = [
   // TODO: Choose a jito endpoint which is closest to your location, and uncomment others
-  "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
-  "https://amsterdam.mainnet.block-engine.jito.wtf/api/v1/bundles",
-  "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/bundles",
-  "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles",
+  // "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
+  // "https://amsterdam.mainnet.block-engine.jito.wtf/api/v1/bundles",
+  // "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/bundles",
+  // "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles",
   "https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles",
 ];
 
@@ -55,8 +54,7 @@ export async function jito_executeAndConfirm(
   const jito_validator_wallet = await getRandomValidator();
   console.log("Selected Jito Validator: ", jito_validator_wallet.toBase58());
   try {
-    const fee = new CurrencyAmount(Currency.SOL, jitofee, false).raw.toNumber();
-    console.log(`Jito Fee: ${fee / 10 ** 9} sol`);
+    console.log(`Jito Fee: ${Number(jitofee)} lamports`);
     const jitoFee_message = new TransactionMessage({
       payerKey: payer.publicKey,
       recentBlockhash: lastestBlockhash.blockhash,
@@ -64,12 +62,46 @@ export async function jito_executeAndConfirm(
         SystemProgram.transfer({
           fromPubkey: payer.publicKey,
           toPubkey: jito_validator_wallet,
-          lamports: fee,
+          lamports: parseInt(jitofee), // Convert to integer lamports
         }),
       ],
     }).compileToV0Message();
+
+
+
     const jitoFee_transaction = new VersionedTransaction(jitoFee_message);
     jitoFee_transaction.sign([payer]);
+
+    // 模拟交易执行
+    try {
+      // 再模拟主交易
+      const mainTxSimulation = await connection.simulateTransaction(transaction);
+      if (mainTxSimulation.value.err) {
+        console.log("主交易模拟失败:", mainTxSimulation.value.err);
+        console.log("详细错误信息:", JSON.stringify(mainTxSimulation.value, null, 2));
+        if (typeof mainTxSimulation.value.err === 'object' && Array.isArray(mainTxSimulation.value.err)) {
+          console.log("失败的指令索引:", mainTxSimulation.value.err[0]);
+          if (mainTxSimulation.value.err[1] && 'Custom' in mainTxSimulation.value.err[1]) {
+            console.log("自定义错误代码:", mainTxSimulation.value.err[1].Custom);
+          }
+        } else {
+          console.log("错误信息:", mainTxSimulation.value.err);
+        }
+        // 打印交易中的指令信息以便调试
+        console.log("交易指令:", transaction.instructions.map((ix: any, index: number) => ({
+          指令索引: index,
+          程序ID: ix.programId.toBase58(),
+          数据: ix.data
+        })));
+        return { confirmed: false, signature: null };
+      }
+      console.log("主交易模拟成功");
+
+    } catch (err) {
+      console.log("交易模拟过程出错:", err);
+      return { confirmed: false, signature: null };
+    }
+
     const jitoTxSignature = bs58.encode(jitoFee_transaction.signatures[0]);
     const serializedJitoFeeTransaction = bs58.encode(
       jitoFee_transaction.serialize()
